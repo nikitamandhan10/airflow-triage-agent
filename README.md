@@ -84,21 +84,3 @@ python -m agent.triage_agent --dag weather_etl --run-id <run_id>
 # Watch mode: poll for new failures and triage each
 python -m agent.triage_agent --watch
 ```
-
-## Roadmap (the learning path)
-
-This repo is structured so you can follow a 6-week build:
-
-- **Week 1:** Get Airflow running with the DAGs in `dags/`
-- **Week 2:** Read and extend `agent/airflow_client.py`
-- **Week 3:** Run `agent/triage_dumb.py` — no LLM, just structured context
-- **Week 4:** Run `agent/triage_llm.py` — single LLM call for classification
-- **Week 5:** Run `agent/triage_agent.py` — full agent with tool-use loop
-- **Week 6:** Wire `slack/notify.py`, add evals in `evals/`, write the README
-
-## What "done" looks like for the portfolio
-
-- Demo GIF of the agent investigating a real failure across multiple tool calls
-- Eval results showing classification accuracy on known failure types
-- A clear README (this file) with architecture, setup, and learnings
-- Honest "what I'd do next" section
