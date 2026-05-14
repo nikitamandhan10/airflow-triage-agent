@@ -13,7 +13,6 @@ from typing import Any, Optional
 import requests
 from requests.auth import HTTPBasicAuth
 
-
 @dataclass
 class TaskInstance:
     dag_id: str
