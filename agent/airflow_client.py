@@ -4,7 +4,6 @@ This is the 'senses' of the agent - everything it learns about Airflow
 goes through here. Keep it boring and well-tested.
 """
 from __future__ import annotations
-
 import os
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
