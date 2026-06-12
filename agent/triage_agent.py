@@ -48,20 +48,28 @@ failed Airflow DAG runs and fix them when it is safe to do so.
     call get_cross_dag_failures to check if an upstream DAG failed recently
 3c. If a task likely consumed XCom from an upstream task and the error involves missing/bad data,
     call get_xcom_value to inspect what the upstream task produced
+3d. If root_cause is upstream_failure, call get_upstream_dag_health with the upstream dag_ids.
+    Note whether all_upstream_healthy is true or false — you will pass this to check_fix_eligibility.
 4. Call get_recent_run_history to check if this is recurring (get recent_failure_count)
 5. Form a conclusion: root_cause + confidence + recent_failure_count
 
 ## PHASE 2: REMEDIATE (after investigation)
-6. Call check_fix_eligibility with your root_cause, confidence, and recent_failure_count
+6. Call check_fix_eligibility with your root_cause, confidence, recent_failure_count,
+   and upstream_healthy (only relevant for upstream_failure).
 7a. If allowed=true  → call retry_failed_task OR trigger_new_dag_run, then write your final report
 7b. If allowed=false → write your final report explaining why human intervention is needed
 
 ## GUARDRAIL RULES (these are also enforced in code)
 - rate_limit, infra_timeout + high confidence + <=2 recent failures → auto-fix allowed
 - schema_drift, data_quality, code_bug, unknown → NEVER auto-fix, always escalate
-- upstream_failure → NEVER auto-fix (the upstream DAG must be fixed first)
+- upstream_failure + upstream recovered (all_upstream_healthy=true) + high confidence + <=2 failures → auto-fix allowed (trigger new run)
+- upstream_failure + upstream still failing → NEVER auto-fix (fix upstream first)
 - medium or low confidence → NEVER auto-fix
 - 3+ recent failures → NEVER auto-fix (chronic issue needs human)
+
+## RETRY FEEDBACK
+If the initial message includes historical retry data for this DAG, factor it in:
+- Low retry success rate (<50%) → raise your confidence threshold, prefer escalation over auto-fix
 
 ## RETRY vs TRIGGER
 - Use retry_failed_task when a specific task failed transiently (rate limit, timeout)
@@ -83,6 +91,37 @@ Always end with ONLY this JSON (no other text after it):
 console = Console()
 
 
+def get_retry_feedback(dag_id: str, airflow: AirflowClient) -> dict:
+    """Return historical retry success rate for a DAG by checking past action log entries."""
+    if not ACTION_LOG_PATH.exists():
+        return {"attempts": 0, "successes": 0, "rate": None}
+
+    lines = ACTION_LOG_PATH.read_text().strip().splitlines()
+    retries = [
+        json.loads(l) for l in lines
+        if json.loads(l).get("dag_id") == dag_id
+        and json.loads(l).get("action") in ("retry_task", "trigger_dag_run")
+    ]
+
+    if not retries:
+        return {"attempts": 0, "successes": 0, "rate": None}
+
+    successes = 0
+    for entry in retries:
+        run_id_entry = entry.get("run_id")
+        task_id = entry.get("task_id")
+        if run_id_entry and task_id:
+            try:
+                state = airflow.get_task_instance_state(dag_id, run_id_entry, task_id)
+                if state == "success":
+                    successes += 1
+            except Exception:
+                pass
+
+    rate = successes / len(retries)
+    return {"attempts": len(retries), "successes": successes, "rate": rate}
+
+
 def run_agent(
     dag_id: str,
     run_id: str,
@@ -99,11 +138,22 @@ def run_agent(
     if verbose:
         console.print(f"Mode: {mode}")
 
+    feedback = get_retry_feedback(dag_id, airflow)
+    feedback_note = ""
+    if feedback["attempts"] > 0:
+        rate_pct = f"{feedback['rate']:.0%}"
+        feedback_note = (
+            f"\n\nHistorical retry data for {dag_id}: "
+            f"{feedback['successes']}/{feedback['attempts']} past auto-retries succeeded ({rate_pct}). "
+            + ("Low success rate — prefer escalation over auto-fix unless confidence is very high." if feedback["rate"] < 0.5 else "Retry history looks healthy.")
+        )
+
     initial_message = (
         f"Investigate and remediate this failed Airflow DAG run:\n"
         f"  dag_id: {dag_id}\n"
         f"  run_id: {run_id}\n\n"
         f"Follow the two-phase process: investigate first, then remediate if safe."
+        + feedback_note
         + ("\n\nNOTE: This is a dry run. Do not call retry_failed_task or trigger_new_dag_run." if dry_run else "")
     )
 

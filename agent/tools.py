@@ -46,7 +46,18 @@ def _log_action(action: str, details: dict):
     logger.info(f"ACTION: {action} | {details}")
 
 
-def check_guardrails(root_cause: str, failure_count: int, confidence: str) -> dict:
+def check_guardrails(root_cause: str, failure_count: int, confidence: str, upstream_healthy: bool = False) -> dict:
+    if root_cause == "upstream_failure":
+        if not upstream_healthy:
+            return {
+                "allowed": False,
+                "reason": "Upstream DAG has not recovered. Retrying now will fail again. Fix upstream first.",
+            }
+        if confidence != "high":
+            return {"allowed": False, "reason": f"Confidence is '{confidence}'. Auto-fix only runs at high confidence."}
+        if failure_count > MAX_AUTO_FIX_FAILURES:
+            return {"allowed": False, "reason": f"DAG has failed {failure_count} times recently. Recurring failures require human review."}
+        return {"allowed": True, "reason": "Upstream has recovered. Safe to trigger a new downstream run."}
     if root_cause in NEVER_AUTO_FIX:
         return {
             "allowed": False,
@@ -147,23 +158,44 @@ class TriageTools:
             "hint": "If any of these DAGs feed data into the current DAG, classify as upstream_failure.",
         }
 
+    @_safe
+    def get_upstream_dag_health(self, upstream_dag_ids: list[str]) -> dict:
+        """Check whether upstream DAGs have recovered (have a recent successful run)."""
+        results = {}
+        for dag_id in upstream_dag_ids:
+            runs = self.client.get_recent_runs_for_dag(dag_id, n=5)
+            recent_states = [r.state for r in runs]
+            healthy = any(r.state == "success" for r in runs)
+            results[dag_id] = {"healthy": healthy, "recent_states": recent_states}
+        all_healthy = all(v["healthy"] for v in results.values()) if results else False
+        return {
+            "upstream_dags": results,
+            "all_upstream_healthy": all_healthy,
+            "recommendation": (
+                "upstream recovered — safe to retry downstream"
+                if all_healthy
+                else "upstream still failing — do not retry downstream"
+            ),
+        }
+
     # ── WRITE TOOLS ─────────────────────────────────────────────────────────
 
     @_safe
-    def check_fix_eligibility(self, dag_id: str, root_cause: str, confidence: str, recent_failure_count: int) -> dict:
-        result = check_guardrails(root_cause, recent_failure_count, confidence)
+    def check_fix_eligibility(self, dag_id: str, root_cause: str, confidence: str, recent_failure_count: int, upstream_healthy: bool = False) -> dict:
+        result = check_guardrails(root_cause, recent_failure_count, confidence, upstream_healthy)
         _log_action("check_fix_eligibility", {
             "dag_id": dag_id,
             "root_cause": root_cause,
             "confidence": confidence,
             "recent_failure_count": recent_failure_count,
+            "upstream_healthy": upstream_healthy,
             "allowed": result["allowed"],
         })
         return result
 
     @_safe
-    def retry_failed_task(self, dag_id: str, run_id: str, task_id: str, root_cause: str, confidence: str, recent_failure_count: int) -> dict:
-        guard = check_guardrails(root_cause, recent_failure_count, confidence)
+    def retry_failed_task(self, dag_id: str, run_id: str, task_id: str, root_cause: str, confidence: str, recent_failure_count: int, upstream_healthy: bool = False) -> dict:
+        guard = check_guardrails(root_cause, recent_failure_count, confidence, upstream_healthy)
         if not guard["allowed"]:
             _log_action("retry_blocked", {"dag_id": dag_id, "run_id": run_id, "task_id": task_id, "reason": guard["reason"]})
             return {"retried": False, "blocked": True, "reason": guard["reason"]}
@@ -178,8 +210,8 @@ class TriageTools:
         }
 
     @_safe
-    def trigger_new_dag_run(self, dag_id: str, root_cause: str, confidence: str, recent_failure_count: int) -> dict:
-        guard = check_guardrails(root_cause, recent_failure_count, confidence)
+    def trigger_new_dag_run(self, dag_id: str, root_cause: str, confidence: str, recent_failure_count: int, upstream_healthy: bool = False) -> dict:
+        guard = check_guardrails(root_cause, recent_failure_count, confidence, upstream_healthy)
         if not guard["allowed"]:
             _log_action("trigger_blocked", {"dag_id": dag_id, "reason": guard["reason"]})
             return {"triggered": False, "blocked": True, "reason": guard["reason"]}
@@ -281,11 +313,32 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "get_upstream_dag_health",
+        "description": (
+            "Check whether upstream DAGs have recovered by looking at their recent run history. "
+            "Call this when root_cause is upstream_failure, BEFORE check_fix_eligibility. "
+            "Pass the dag_ids of the upstream DAGs that failed. "
+            "If all_upstream_healthy is true, pass upstream_healthy=true to check_fix_eligibility."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "upstream_dag_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of upstream DAG IDs to check",
+                },
+            },
+            "required": ["upstream_dag_ids"],
+        },
+    },
+    {
         "name": "check_fix_eligibility",
         "description": (
             "Check whether auto-fix is permitted for this failure. "
             "You MUST call this before attempting any retry or trigger. "
-            "Pass the root_cause and confidence you determined, plus recent_failure_count."
+            "Pass the root_cause and confidence you determined, plus recent_failure_count. "
+            "For upstream_failure, also pass upstream_healthy from get_upstream_dag_health."
         ),
         "input_schema": {
             "type": "object",
@@ -297,6 +350,7 @@ TOOL_SCHEMAS = [
                 },
                 "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                 "recent_failure_count": {"type": "integer"},
+                "upstream_healthy": {"type": "boolean", "description": "Set to true only if get_upstream_dag_health confirmed all_upstream_healthy=true."},
             },
             "required": ["dag_id", "root_cause", "confidence", "recent_failure_count"],
         },
@@ -317,6 +371,7 @@ TOOL_SCHEMAS = [
                 "root_cause": {"type": "string"},
                 "confidence": {"type": "string"},
                 "recent_failure_count": {"type": "integer"},
+                "upstream_healthy": {"type": "boolean"},
             },
             "required": ["dag_id", "run_id", "task_id", "root_cause", "confidence", "recent_failure_count"],
         },
@@ -335,6 +390,7 @@ TOOL_SCHEMAS = [
                 "root_cause": {"type": "string"},
                 "confidence": {"type": "string"},
                 "recent_failure_count": {"type": "integer"},
+                "upstream_healthy": {"type": "boolean"},
             },
             "required": ["dag_id", "root_cause", "confidence", "recent_failure_count"],
         },
