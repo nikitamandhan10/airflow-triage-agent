@@ -29,8 +29,9 @@ from rich.table import Table
 
 from agent.airflow_client import AirflowClient
 from agent.tools import TOOL_SCHEMAS, TriageTools, dispatch_tool, ACTION_LOG_PATH
+from slack.notify import post_to_slack
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-sonnet-4-6"
 MAX_AGENT_TURNS = 15
 
 # Write tool names - used to block them in dry-run mode
@@ -42,7 +43,11 @@ failed Airflow DAG runs and fix them when it is safe to do so.
 ## PHASE 1: INVESTIGATE (always do this first)
 1. Call get_dag_run_status to see which tasks failed
 2. Call get_task_logs on the primary failed task to read the error
-3. If the error suggests an upstream cause, call get_task_dependencies
+3. If the error suggests an upstream within-DAG cause, call get_task_dependencies
+3b. If the DAG name suggests it consumes other DAGs (e.g., "reporting", "summary", "aggregate"),
+    call get_cross_dag_failures to check if an upstream DAG failed recently
+3c. If a task likely consumed XCom from an upstream task and the error involves missing/bad data,
+    call get_xcom_value to inspect what the upstream task produced
 4. Call get_recent_run_history to check if this is recurring (get recent_failure_count)
 5. Form a conclusion: root_cause + confidence + recent_failure_count
 
@@ -54,6 +59,7 @@ failed Airflow DAG runs and fix them when it is safe to do so.
 ## GUARDRAIL RULES (these are also enforced in code)
 - rate_limit, infra_timeout + high confidence + <=2 recent failures → auto-fix allowed
 - schema_drift, data_quality, code_bug, unknown → NEVER auto-fix, always escalate
+- upstream_failure → NEVER auto-fix (the upstream DAG must be fixed first)
 - medium or low confidence → NEVER auto-fix
 - 3+ recent failures → NEVER auto-fix (chronic issue needs human)
 
@@ -234,6 +240,51 @@ def show_action_log():
         console.print(f"[{color}]{entry['timestamp']}[/{color}] {entry['action']} | {json.dumps({k:v for k,v in entry.items() if k not in ('timestamp','action')})}")
 
 
+def check_action_outcomes(airflow: AirflowClient):
+    """Read action log, find past retries, and report whether they succeeded."""
+    if not ACTION_LOG_PATH.exists():
+        console.print("[dim]No action log yet.[/dim]")
+        return
+
+    lines = ACTION_LOG_PATH.read_text().strip().splitlines()
+    retries = [
+        json.loads(l) for l in lines
+        if json.loads(l).get("action") in ("retry_task", "trigger_dag_run")
+    ]
+
+    if not retries:
+        console.print("[dim]No retries or triggers in action log.[/dim]")
+        return
+
+    table = Table(title="Retry Outcomes", show_header=True, border_style="blue")
+    table.add_column("Timestamp", style="dim")
+    table.add_column("DAG")
+    table.add_column("Task / New Run")
+    table.add_column("Current State")
+
+    for entry in retries[-20:]:
+        dag_id = entry.get("dag_id", "?")
+        run_id = entry.get("run_id")
+        task_id = entry.get("task_id")
+        new_run_id = entry.get("new_run_id")
+
+        label = task_id or new_run_id or "?"
+
+        if run_id and task_id:
+            try:
+                state = airflow.get_task_instance_state(dag_id, run_id, task_id)
+                color = "green" if state == "success" else "red" if state == "failed" else "yellow"
+                state_str = f"[{color}]{state}[/{color}]"
+            except Exception as e:
+                state_str = f"[dim]unavailable ({e})[/dim]"
+        else:
+            state_str = "[dim]n/a[/dim]"
+
+        table.add_row(entry["timestamp"][:19], dag_id, label, state_str)
+
+    console.print(table)
+
+
 def find_latest_failure(client: AirflowClient):
     runs = client.get_recent_failed_runs(hours=72, limit=5)
     if not runs:
@@ -250,6 +301,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Investigate only, no auto-fixes")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--show-log", action="store_true", help="Show recent action audit log")
+    parser.add_argument("--check-outcomes", action="store_true", help="Check whether past auto-retries succeeded")
     args = parser.parse_args()
 
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -260,6 +312,10 @@ def main():
         return
 
     airflow = AirflowClient()
+
+    if args.check_outcomes:
+        check_action_outcomes(airflow)
+        return
 
     if args.watch:
         console.print("[bold]Watching for failures...[/bold] (Ctrl-C to stop)")
@@ -287,6 +343,7 @@ def main():
                         border_style="red",
                     ))
                     print_summary_table(report)
+                    post_to_slack(report)
                 time.sleep(30)
             except KeyboardInterrupt:
                 console.print("\nStopped.")
@@ -315,6 +372,7 @@ def main():
     console.rule("[bold green]FINAL REPORT")
     console.print(Syntax(json.dumps(report, indent=2), "json"))
     print_summary_table(report)
+    post_to_slack(report)
 
 
 if __name__ == "__main__":

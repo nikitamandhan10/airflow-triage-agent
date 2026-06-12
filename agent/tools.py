@@ -32,7 +32,7 @@ ACTION_LOG_PATH = Path("action_log.jsonl")
 
 AUTO_FIX_ALLOWED = {"rate_limit", "infra_timeout"}
 NEVER_AUTO_FIX = {"schema_drift", "data_quality", "code_bug", "unknown"}
-MAX_AUTO_FIX_FAILURES = 10
+MAX_AUTO_FIX_FAILURES = 2
 
 
 def _log_action(action: str, details: dict):
@@ -133,6 +133,20 @@ class TriageTools:
             "recent_failure_count": recent_failures,
         }
 
+    @_safe
+    def get_xcom_value(self, dag_id: str, run_id: str, task_id: str, key: str = "return_value") -> dict:
+        return self.client.get_xcom_value(dag_id, run_id, task_id, key)
+
+    @_safe
+    def get_cross_dag_failures(self, current_dag_id: str, hours: int = 2) -> dict:
+        runs = self.client.get_recent_failed_runs(hours=hours, limit=20)
+        other = [asdict(r) for r in runs if r.dag_id != current_dag_id]
+        return {
+            "other_failed_dags": other,
+            "count": len(other),
+            "hint": "If any of these DAGs feed data into the current DAG, classify as upstream_failure.",
+        }
+
     # ── WRITE TOOLS ─────────────────────────────────────────────────────────
 
     @_safe
@@ -229,6 +243,41 @@ TOOL_SCHEMAS = [
                 "n": {"type": "integer", "default": 10},
             },
             "required": ["dag_id"],
+        },
+    },
+    {
+        "name": "get_xcom_value",
+        "description": (
+            "Fetch an XCom value produced by a specific task. "
+            "Call this when a downstream task failed and may have consumed bad/missing data "
+            "from an upstream task's output."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dag_id": {"type": "string"},
+                "run_id": {"type": "string"},
+                "task_id": {"type": "string"},
+                "key": {"type": "string", "default": "return_value"},
+            },
+            "required": ["dag_id", "run_id", "task_id"],
+        },
+    },
+    {
+        "name": "get_cross_dag_failures",
+        "description": (
+            "Check for recent failures in other DAGs. "
+            "Call this when the failing DAG is likely a consumer of another DAG "
+            "(e.g., a reporting DAG that depends on ETL DAGs). "
+            "If another DAG failed recently, this run's failure is probably upstream_failure."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "current_dag_id": {"type": "string"},
+                "hours": {"type": "integer", "default": 2},
+            },
+            "required": ["current_dag_id"],
         },
     },
     {

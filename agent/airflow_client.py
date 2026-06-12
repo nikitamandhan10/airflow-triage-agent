@@ -53,6 +53,11 @@ class AirflowClient:
         r.raise_for_status()
         return r.json()
 
+    def _post(self, path: str, body: Optional[dict] = None) -> dict:
+        r = requests.post(f"{self.api}{path}", auth=self.auth, json=body or {}, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
     # ---------- DAG Runs ----------
 
     def list_dags(self) -> list[dict]:
@@ -152,6 +157,39 @@ class AirflowClient:
         )
         r.raise_for_status()
         return r.text
+
+    # ---------- Write Actions ----------
+
+    def clear_task_instance(self, dag_id: str, run_id: str, task_id: str) -> dict:
+        """Clear a task instance so Airflow re-queues it."""
+        body = {
+            "dry_run": False,
+            "task_ids": [task_id],
+            "dag_run_id": run_id,
+            "include_downstream": False,
+            "include_future": False,
+            "include_parentdag": False,
+            "include_upstream": False,
+            "reset_dag_runs": True,
+        }
+        return self._post(f"/dags/{dag_id}/clearTaskInstances", body)
+
+    def trigger_dag_run(self, dag_id: str) -> dict:
+        """Trigger a new DAG run and return the new run_id."""
+        data = self._post(f"/dags/{dag_id}/dagRuns", {})
+        return {"new_run_id": data.get("dag_run_id"), "state": data.get("state")}
+
+    def get_xcom_value(self, dag_id: str, run_id: str, task_id: str, key: str = "return_value") -> dict:
+        """Fetch a single XCom value produced by a task."""
+        data = self._get(
+            f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/xcomEntries/{key}"
+        )
+        return {"key": key, "value": data.get("value")}
+
+    def get_task_instance_state(self, dag_id: str, run_id: str, task_id: str) -> str:
+        """Return the current state of a specific task instance."""
+        data = self._get(f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}")
+        return data.get("state", "unknown")
 
     # ---------- DAG Structure ----------
 

@@ -19,7 +19,7 @@ import anthropic
 
 from agent.triage_dumb import triage
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You are an on-call data engineering assistant. You receive structured \
 information about a failed Airflow DAG run and produce a triage report.

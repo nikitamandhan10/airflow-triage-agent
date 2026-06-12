@@ -1,0 +1,17 @@
+{
+  "accuracy": 0.0,
+  "results": [
+    {
+      "case": "weather API rate limit \u2014 transient, should auto-retry",
+      "error": "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}, 'request_id': 'req_011Cbx67ePjhNyPhrH1xwP7D'}"
+    },
+    {
+      "case": "sales CSV schema drift \u2014 KeyError on renamed column, needs human",
+      "error": "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}, 'request_id': 'req_011Cbx67fQGAPzyKiEZLQ29E'}"
+    },
+    {
+      "case": "reporting DAG failed because upstream sales_etl DAG failed",
+      "error": "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}, 'request_id': 'req_011Cbx67gJLB4EdcRHBgbaHF'}"
+    }
+  ]
+}
