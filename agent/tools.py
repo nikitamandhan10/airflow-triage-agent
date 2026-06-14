@@ -15,8 +15,8 @@ GUARDRAIL RULES (enforced in code, not just in the prompt):
   - unknown         -> NEVER auto-fix
   - recurring (3+)  -> NEVER auto-fix regardless of cause
 """
-from __future__ import annotations
 
+from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict
