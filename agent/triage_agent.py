@@ -1,6 +1,5 @@
 """
 Advanced triage agent with auto-fix capability.
-
 TWO PHASES:
   Phase 1 - Investigate: read-only tools to understand the failure
   Phase 2 - Remediate:   decide whether to auto-fix or escalate
@@ -14,6 +13,7 @@ Usage:
     python -m agent.triage_agent --watch
     python -m agent.triage_agent --latest --dry-run   # investigate only, no fixes
 """
+
 from __future__ import annotations
 import argparse
 import json
