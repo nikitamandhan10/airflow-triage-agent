@@ -22,7 +22,6 @@ class TaskInstance:
     end_date: Optional[str]
     duration: Optional[float]
 
-
 @dataclass
 class DagRun:
     dag_id: str
