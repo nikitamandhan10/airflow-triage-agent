@@ -6,6 +6,7 @@ Three canned scenarios:
   schema_drift     — sales_etl load task hits KeyError on renamed column
   upstream_failure — reporting DAG fails because sales_etl failed first
 """
+
 from __future__ import annotations
 from datetime import datetime, timezone
 from agent.airflow_client import DagRun, TaskInstance
